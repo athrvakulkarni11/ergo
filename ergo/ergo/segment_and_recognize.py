@@ -68,11 +68,26 @@ class YOLOFaceRecognizerPublisher(Node):
 
         masks = results[0].masks.data.numpy()  # Segmentation masks
         boxes = results[0].boxes.data.numpy()
+        class_names = results[0].names  # Get class names from model
+
+        # Find the nearest object (based on area)
+        nearest_object = None
+        max_area = 0
 
         for box, mask in zip(boxes, masks):
             x1, y1, x2, y2, confidence, class_id = map(int, box[:6])
+            area = (x2 - x1) * (y2 - y1)
+            
+            # Create object info dictionary
+            object_info = {
+                "object": class_names[class_id],
+                "coordinates": (x1, y1, x2, y2),
+                "area": area,
+                "confidence": float(confidence),
+                "face": None
+            }
 
-            if class_id == 0:  # 'person' class in COCO dataset
+            if class_id == 0:  # 'person' class
                 binary_mask = mask.astype(np.uint8) * 255
                 segmented_person = cv2.bitwise_and(frame, frame, mask=binary_mask)
 
@@ -80,11 +95,10 @@ class YOLOFaceRecognizerPublisher(Node):
                 segmented_msg = self.bridge.cv2_to_imgmsg(segmented_person, encoding="bgr8")
                 self.segmented_image_pub.publish(segmented_msg)
 
-                # Crop for further processing
+                # Process face recognition
                 segmented_cropped = segmented_person[y1:y2, x1:x2]
                 gray_segment = cv2.cvtColor(segmented_cropped, cv2.COLOR_BGR2GRAY)
 
-                # Face detection and recognition
                 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
                 faces = face_cascade.detectMultiScale(gray_segment, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
@@ -94,19 +108,24 @@ class YOLOFaceRecognizerPublisher(Node):
 
                     label, conf = self.recognizer.predict(face_image)
                     name = self.label_map.get(label, "Unknown")
+                    object_info["face"] = name
 
                     # Publish face recognition image
                     face_msg = self.bridge.cv2_to_imgmsg(face_image, encoding="mono8")
                     self.face_image_pub.publish(face_msg)
 
-                    # Publish object information
-                    object_info = {
-                        "object": "person",
-                        "coordinates": (x1, y1, x2, y2),
-                        "face": name,
-                        "confidence": conf
-                    }
-                    self.object_info_pub.publish(String(data=str(object_info)))
+            # Update nearest object if this is the largest one so far
+            if area > max_area:
+                max_area = area
+                nearest_object = object_info
+
+            # Publish individual object information
+            self.object_info_pub.publish(String(data=str(object_info)))
+
+        # Publish nearest object information separately
+        if nearest_object:
+            nearest_msg = String(data=str({"nearest_object": nearest_object}))
+            self.object_info_pub.publish(nearest_msg)
 
     def destroy_node(self):
         self.cap.release()
