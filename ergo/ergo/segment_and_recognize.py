@@ -5,7 +5,7 @@ import os
 import pickle
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from std_msgs.msg import String
 from cv_bridge import CvBridge
 
@@ -29,9 +29,22 @@ class YOLOFaceRecognizerPublisher(Node):
         # Load Face Recognizer
         self.recognizer, self.label_map = self.load_face_recognizer()
 
-        # Start video stream
-        self.cap = cv2.VideoCapture(0)
+        # Replace video capture with subscriber
+        self.current_frame = None
+        self.camera_sub = self.create_subscription(
+            CompressedImage,
+            '/camera/image_raw/compressed',
+            self.camera_callback,
+            10
+        )
+        
+        # Create timer for processing
         self.timer = self.create_timer(0.1, self.process_frame)
+
+    def camera_callback(self, msg):
+        # Convert compressed image to opencv format
+        np_arr = np.frombuffer(msg.data, np.uint8)
+        self.current_frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
     def load_face_recognizer(self):
         recognizer = cv2.face.LBPHFaceRecognizer_create()
@@ -55,10 +68,11 @@ class YOLOFaceRecognizerPublisher(Node):
         return recognizer, label_map
 
     def process_frame(self):
-        ret, frame = self.cap.read()
-        if not ret:
+        # Check if we have received any frame
+        if self.current_frame is None:
             return
 
+        frame = self.current_frame
         results = self.model(frame, task="segment", device='cpu')
 
         # Check for detections and segmentation masks
@@ -88,9 +102,14 @@ class YOLOFaceRecognizerPublisher(Node):
             }
 
             if class_id == 0:  # 'person' class
-                binary_mask = mask.astype(np.uint8) * 255
-                segmented_person = cv2.bitwise_and(frame, frame, mask=binary_mask)
+                # Create binary mask from the segmentation mask
+                binary_mask = (mask > 0.5)  # Convert probability mask to binary mask
+                binary_mask = binary_mask.astype(np.uint8)
 
+                # Reshape the mask to match the frame dimensions
+                binary_mask = cv2.resize(binary_mask, (frame.shape[1], frame.shape[0]))
+
+                segmented_person = cv2.bitwise_and(frame, frame, mask=binary_mask)
                 # Publish segmented image
                 segmented_msg = self.bridge.cv2_to_imgmsg(segmented_person, encoding="bgr8")
                 self.segmented_image_pub.publish(segmented_msg)
@@ -128,7 +147,6 @@ class YOLOFaceRecognizerPublisher(Node):
             self.object_info_pub.publish(nearest_msg)
 
     def destroy_node(self):
-        self.cap.release()
         super().destroy_node()
 
 

@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'segment_and_recognize=ergo.segment_and_recognize:main',
+            'track=ergo.track:main',
         ],
     },
 )

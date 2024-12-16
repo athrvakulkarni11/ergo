@@ -41,19 +41,26 @@ class ObjectFollowerWithDynamicReconfig(Node):
     def __init__(self):
         super().__init__('object_follower_dynamic_reconfig')
 
-        # Add new parameters
+        # Add all parameter declarations
         self.declare_parameter(
             'tracking_mode',
-            'person',  # Can be 'person' or 'object'
+            'person',
             descriptor=ParameterDescriptor(
                 description="Tracking mode: 'person' or 'object'"
             )
         )
         self.declare_parameter(
             'target_object',
-            '',  # Empty string means track nearest object
+            '',
             descriptor=ParameterDescriptor(
                 description="Specific object class to track (empty for nearest)"
+            )
+        )
+        self.declare_parameter(
+            'person_to_track',
+            'Unknown',
+            descriptor=ParameterDescriptor(
+                description="Name of the person to track"
             )
         )
         
@@ -62,67 +69,66 @@ class ObjectFollowerWithDynamicReconfig(Node):
         self.target_object = self.get_parameter('target_object').value
         self.target_person = self.get_parameter('person_to_track').value
 
-        # Subscriber for detected_objects
+        # Create subscribers and publishers
         self.subscription = self.create_subscription(
             String,
             'detected_objects',
             self.object_callback,
             10
         )
-
-        # Publisher for cmd_vel
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
         # PID Controllers
-        self.linear_pid = PIDController(kp=0.5, ki=0.01, kd=0.1)
-        self.angular_pid = PIDController(kp=0.5, ki=0.01, kd=0.1)
+        self.linear_pid = PIDController(kp=0.3, ki=0.01, kd=0.05)  # Adjusted gains
+        self.angular_pid = PIDController(kp=0.3, ki=0.01, kd=0.05)  # Adjusted gains
 
         # Parameters
-        self.target_distance = 1.0  # Desired stopping distance
-        self.max_linear_speed = 0.3
-        self.max_angular_speed = 1.0
-        self.frame_center = (320, 240)  # Assuming a 640x480 frame
+        self.target_distance = 1.0
+        self.max_linear_speed = 0.2  # Reduced max speed
+        self.max_angular_speed = 0.5  # Reduced max angular speed
+        self.frame_center = (320, 240)
 
-        self.get_logger().info(f"Tracking initialized for: {self.target_person}")
+        self.get_logger().info(f"Node initialized. Tracking mode: {self.tracking_mode}")
+        self.get_logger().info(f"Target person: {self.target_person}")
+        self.get_logger().info(f"Target object: {self.target_object}")
 
     def object_callback(self, msg):
+        self.get_logger().debug(f"Received message: {msg.data}")  # Debug logging
+        
         try:
-            # Parse object info
             data = ast.literal_eval(msg.data)
             
-            # Check if this is a nearest object message
             if "nearest_object" in data:
                 nearest = data["nearest_object"]
                 if self.tracking_mode == 'object':
                     if not self.target_object or nearest["object"] == self.target_object:
+                        self.get_logger().info(f"Tracking nearest object: {nearest}")
                         self.track_object(nearest)
                     return
 
-            # Regular object tracking logic
             object_info = data
             obj_class = object_info.get("object", "Unknown")
             person_name = object_info.get("face", "Unknown")
             coords = object_info.get("coordinates", None)
 
+            self.get_logger().debug(f"Processing object: {obj_class}, person: {person_name}")
+
             if self.tracking_mode == 'person':
-                # Person tracking mode
                 if obj_class == "person":
                     if self.target_person == "Unknown" or person_name == self.target_person:
                         if coords:
+                            self.get_logger().info(f"Tracking person: {person_name}")
                             self.track_object(object_info)
             else:
-                # Object tracking mode
                 if self.target_object and obj_class == self.target_object:
                     if coords:
+                        self.get_logger().info(f"Tracking object: {obj_class}")
                         self.track_object(object_info)
 
         except Exception as e:
-            self.get_logger().error(f"Failed to process object data: {str(e)}")
+            self.get_logger().error(f"Error processing object data: {str(e)}")
 
     def track_object(self, object_info):
-        """
-        Generic tracking function for both persons and objects
-        """
         coords = object_info.get("coordinates")
         if not coords:
             self.stop_robot()
@@ -132,13 +138,10 @@ class ObjectFollowerWithDynamicReconfig(Node):
         cx = (x1 + x2) // 2
         cy = (y1 + y2) // 2
         
+        self.get_logger().debug(f"Object center: ({cx}, {cy})")
         self.follow_target(cx, cy)
 
     def follow_target(self, cx, cy):
-        """
-        Renamed from follow_person to follow_target for generic tracking
-        """
-        # Previous follow_person implementation remains the same
         bbox_area = abs((cx - self.frame_center[0]) * (cy - self.frame_center[1]))
         distance_to_target = max(0.1, 1000 / bbox_area)
 
@@ -156,47 +159,40 @@ class ObjectFollowerWithDynamicReconfig(Node):
         twist = Twist()
         twist.linear.x = linear_speed
         twist.angular.z = angular_speed
-        self.cmd_vel_pub.publish(twist)
-
-        target_type = "person" if self.tracking_mode == "person" else "object"
-        target_name = self.target_person if self.tracking_mode == "person" else self.target_object
         
-        self.get_logger().info(
-            f"Tracking {target_type} ({target_name}): "
-            f"Linear Speed: {linear_speed:.2f}, Angular Speed: {angular_speed:.2f}"
-        )
+        try:
+            self.cmd_vel_pub.publish(twist)
+            self.get_logger().debug(f"Published velocities - linear: {linear_speed:.2f}, angular: {angular_speed:.2f}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to publish velocity command: {str(e)}")
 
     def stop_robot(self):
-        """
-        Publish zero velocities to stop the robot.
-        """
-        twist = Twist()
-        self.cmd_vel_pub.publish(twist)
-
-    def set_target_person(self):
-        """
-        Update the target person dynamically based on the parameter change.
-        """
-        self.target_person = self.get_parameter('person_to_track').value
-        self.get_logger().info(f"Tracking person updated to: {self.target_person}")
-
+        try:
+            twist = Twist()
+            self.cmd_vel_pub.publish(twist)
+        except Exception as e:
+            self.get_logger().error(f"Failed to stop robot: {str(e)}")
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ObjectFollowerWithDynamicReconfig()
-
-    # Callback to dynamically update the target person
-    node.add_on_set_parameters_callback(lambda params: node.set_target_person())
-
+    node = None
+    
     try:
+        node = ObjectFollowerWithDynamicReconfig()
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info('Shutting down Object Follower with Dynamic Reconfig.')
+        pass
+    except Exception as e:
+        if node:
+            node.get_logger().error(f"Unexpected error: {str(e)}")
     finally:
-        node.stop_robot()  # Ensure the robot stops on shutdown
-        node.destroy_node()
+        if node:
+            try:
+                node.stop_robot()
+                node.destroy_node()
+            except Exception as e:
+                print(f"Error during shutdown: {str(e)}")
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
