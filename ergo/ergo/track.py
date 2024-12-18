@@ -5,6 +5,7 @@ from std_msgs.msg import String
 from geometry_msgs.msg import Twist
 import ast
 import time
+import math
 
 
 class PIDController:
@@ -78,15 +79,22 @@ class ObjectFollowerWithDynamicReconfig(Node):
         )
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
-        # PID Controllers
-        self.linear_pid = PIDController(kp=0.3, ki=0.01, kd=0.05)  # Adjusted gains
-        self.angular_pid = PIDController(kp=0.3, ki=0.01, kd=0.05)  # Adjusted gains
+        # Improved PID Controllers with better tuned values
+        self.linear_pid = PIDController(kp=0.4, ki=0.01, kd=0.1)
+        self.angular_pid = PIDController(kp=0.5, ki=0.01, kd=0.15)
 
-        # Parameters
-        self.target_distance = 1.0
-        self.max_linear_speed = 0.2  # Reduced max speed
-        self.max_angular_speed = 0.5  # Reduced max angular speed
-        self.frame_center = (320, 240)
+        # Additional tracking parameters
+        self.target_distance = 1.0  # meters
+        self.max_linear_speed = 0.3
+        self.max_angular_speed = 0.5
+        self.frame_center = (320, 240)  # Assuming 640x480 resolution
+        
+        # Add deadzone and threshold parameters
+        self.linear_deadzone = 0.05    # Minimum movement threshold
+        self.angular_deadzone = 10     # Pixels from center
+        self.size_threshold = 0.2      # How much size can vary before moving
+        self.last_valid_detection = None
+        self.detection_timeout = 0.5    # Seconds
 
         self.get_logger().info(f"Node initialized. Tracking mode: {self.tracking_mode}")
         self.get_logger().info(f"Target person: {self.target_person}")
@@ -129,46 +137,92 @@ class ObjectFollowerWithDynamicReconfig(Node):
             self.get_logger().error(f"Error processing object data: {str(e)}")
 
     def track_object(self, object_info):
+        current_time = time.time()
         coords = object_info.get("coordinates")
+        
         if not coords:
-            self.stop_robot()
+            if (self.last_valid_detection and 
+                current_time - self.last_valid_detection > self.detection_timeout):
+                self.stop_robot()
+                self.last_valid_detection = None
             return
 
         x1, y1, x2, y2 = coords
+        width = x2 - x1
+        height = y2 - y1
         cx = (x1 + x2) // 2
         cy = (y1 + y2) // 2
         
-        self.get_logger().debug(f"Object center: ({cx}, {cy})")
-        self.follow_target(cx, cy)
+        # Calculate confidence based on object size and position
+        size_confidence = min(1.0, (width * height) / (self.frame_center[0] * self.frame_center[1]))
+        center_distance = abs(cx - self.frame_center[0])
+        position_confidence = 1.0 - (center_distance / self.frame_center[0])
+        tracking_confidence = size_confidence * position_confidence
 
-    def follow_target(self, cx, cy):
-        bbox_area = abs((cx - self.frame_center[0]) * (cy - self.frame_center[1]))
-        distance_to_target = max(0.1, 1000 / bbox_area)
+        self.get_logger().debug(
+            f"Tracking confidence: {tracking_confidence:.2f}, "
+            f"Size: {width}x{height}, Center: ({cx}, {cy})"
+        )
 
-        linear_error = distance_to_target - self.target_distance
-        linear_speed = self.linear_pid.compute(0, linear_error)
-        linear_speed = max(-self.max_linear_speed, min(self.max_linear_speed, linear_speed))
+        if tracking_confidence > 0.3:  # Only track if confidence is high enough
+            self.last_valid_detection = current_time
+            self.follow_target(cx, cy, width, height, tracking_confidence)
+        else:
+            self.stop_robot()
 
-        angular_error = cx - self.frame_center[0]
-        angular_speed = self.angular_pid.compute(0, angular_error)
-        angular_speed = max(-self.max_angular_speed, min(self.max_angular_speed, angular_speed))
+    def follow_target(self, cx, cy, width, height, confidence):
+        # Calculate target area based on desired distance
+        target_area = (self.frame_center[0] * self.frame_center[1]) / (self.target_distance ** 2)
+        current_area = width * height
+        
+        # Improved distance estimation using object size
+        distance_error = (target_area - current_area) / target_area
+        
+        # Apply confidence to movements
+        linear_speed = self.linear_pid.compute(0, distance_error) * confidence
+        
+        # Calculate normalized angular error (-1 to 1)
+        angular_error = (cx - self.frame_center[0]) / self.frame_center[0]
+        angular_speed = self.angular_pid.compute(0, angular_error) * confidence
 
-        if abs(linear_error) < 0.1:
+        # Apply deadzones to prevent jitter
+        if abs(distance_error) < self.linear_deadzone:
             linear_speed = 0.0
+        if abs(cx - self.frame_center[0]) < self.angular_deadzone:
+            angular_speed = 0.0
 
+        # Smooth acceleration/deceleration
+        linear_speed = self.smooth_velocity(linear_speed, self.max_linear_speed)
+        angular_speed = self.smooth_velocity(angular_speed, self.max_angular_speed)
+
+        # Create and publish velocity command
         twist = Twist()
         twist.linear.x = linear_speed
-        twist.angular.z = angular_speed
+        twist.angular.z = -angular_speed  # Negative because positive angular is counterclockwise
         
         try:
             self.cmd_vel_pub.publish(twist)
-            self.get_logger().debug(f"Published velocities - linear: {linear_speed:.2f}, angular: {angular_speed:.2f}")
+            self.get_logger().debug(
+                f"Distance error: {distance_error:.2f}, "
+                f"Angular error: {angular_error:.2f}, "
+                f"Speeds - linear: {linear_speed:.2f}, angular: {angular_speed:.2f}"
+            )
         except Exception as e:
             self.get_logger().error(f"Failed to publish velocity command: {str(e)}")
 
+    def smooth_velocity(self, velocity, max_speed):
+        """Apply smooth acceleration and deceleration."""
+        # Limit acceleration
+        max_accel = max_speed * 0.1  # 10% of max speed per cycle
+        if abs(velocity) > max_speed:
+            velocity = math.copysign(max_speed, velocity)
+        return velocity
+
     def stop_robot(self):
+        """Gradually stop the robot instead of immediate stop."""
         try:
             twist = Twist()
+            # Could implement gradual stopping here if needed
             self.cmd_vel_pub.publish(twist)
         except Exception as e:
             self.get_logger().error(f"Failed to stop robot: {str(e)}")
