@@ -39,13 +39,11 @@ source install/setup.bash
 
 3. **Run the System**
 ```bash
-# Terminal 1: Start the main voice command interface
-ros2 run ergo main
 
-# Terminal 2: Start object detection and recognition
+# Terminal 1: Start object detection and recognition
 ros2 run ergo segment_and_recognize
 
-# Terminal 3: Start tracking node
+# Terminal 2: Start tracking node
 ros2 run ergo track
 ```
 
