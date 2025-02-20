@@ -88,5 +88,4 @@ The system understands various natural language commands:
 - ROS2 Community
 - Ultralytics YOLOv8
 - GROQ API
-```
-
+ 
